@@ -8,10 +8,12 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-ini/ini v1.42.0 // indirect
 	github.com/golang/protobuf v0.0.0-20170622202551-6a1fa9404c0a // indirect
+	github.com/gomodule/redigo v2.0.0+incompatible
 	github.com/google/uuid v0.0.0-20170306145142-6a5e28554805
 	github.com/jmespath/go-jmespath v0.0.0-20180206201540-c2b33e8439af // indirect
 	github.com/matryer/try v0.0.0-20150601225556-312d2599e12e
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
+	github.com/newshipt/shipt-go-core v4.3.3+incompatible // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_golang v0.0.0-20170707173355-26b897001974
 	github.com/prometheus/client_model v0.0.0-20170216185247-6f3806018612 // indirect

@@ -40,8 +40,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
-	"github.com/aws/aws-sdk-go/service/kinesis"
-	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
+	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
+	"github.com/aws/aws-sdk-go/service/dynamodbstreams"
+	"github.com/aws/aws-sdk-go/service/dynamodbstreams/dynamodbstreamsiface"
 
 	chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
 	"github.com/vmware/vmware-go-kcl/clientlibrary/config"
@@ -62,7 +63,8 @@ type Worker struct {
 
 	processorFactory kcl.IRecordProcessorFactory
 	kclConfig        *config.KinesisClientLibConfiguration
-	kc               kinesisiface.KinesisAPI
+	dbClient         dynamodbiface.DynamoDBAPI
+	streamsClient    dynamodbstreamsiface.DynamoDBStreamsAPI
 	checkpointer     chk.Checkpointer
 
 	stop      *chan struct{}
@@ -86,24 +88,9 @@ func NewWorker(factory kcl.IRecordProcessorFactory, kclConfig *config.KinesisCli
 		metricsConfig:    metricsConfig,
 	}
 
-	// create session for Kinesis
-	log.Info("Creating Kinesis session")
-
-	s, err := session.NewSession(&aws.Config{
-		Region:      aws.String(w.regionName),
-		Endpoint:    &kclConfig.KinesisEndpoint,
-		Credentials: kclConfig.KinesisCredentials,
-	})
-
-	if err != nil {
-		// no need to move forward
-		log.Fatalf("Failed in getting Kinesis session for creating Worker: %+v", err)
-	}
-	w.kc = kinesis.New(s)
-
 	log.Info("Creating DynamoDB session")
 
-	s, err = session.NewSession(&aws.Config{
+	s, err := session.NewSession(&aws.Config{
 		Region:      aws.String(w.regionName),
 		Endpoint:    &kclConfig.DynamoDBEndpoint,
 		Credentials: kclConfig.DynamoDBCredentials,
@@ -114,6 +101,8 @@ func NewWorker(factory kcl.IRecordProcessorFactory, kclConfig *config.KinesisCli
 		log.Fatalf("Failed in getting DynamoDB session for creating Worker: %+v", err)
 	}
 
+	w.dbClient = dynamodb.New(s)
+	w.streamsClient = dynamodbstreams.New(s)
 	w.checkpointer = chk.NewDynamoCheckpoint(dynamodb.New(s), kclConfig)
 
 	if w.metricsConfig == nil {
@@ -154,24 +143,23 @@ func (w *Worker) Shutdown() {
 	log.Info("Worker loop is complete. Exiting from worker.")
 }
 
-// Publish to write some data into stream. This function is mainly used for testing purpose.
-func (w *Worker) Publish(streamName, partitionKey string, data []byte) error {
-	_, err := w.kc.PutRecord(&kinesis.PutRecordInput{
-		Data:         data,
-		StreamName:   aws.String(streamName),
-		PartitionKey: aws.String(partitionKey),
-	})
-	if err != nil {
-		log.Errorf("Error in publishing data to %s/%s. Error: %+v", streamName, partitionKey, err)
-	}
-	return err
-}
-
 // initialize
 func (w *Worker) initialize() error {
 	log.Info("Worker initialization in progress...")
 
-	err := w.metricsConfig.Init(w.kclConfig.ApplicationName, w.streamName, w.workerID)
+	log.Info("Fetching latest stream ARN...")
+	res, err := w.dbClient.DescribeTable(&dynamodb.DescribeTableInput{
+		TableName: aws.String(w.kclConfig.TableName),
+	})
+
+	if err != nil {
+		log.Error("error fetching stream ARN")
+	} else {
+		w.streamName = *res.Table.LatestStreamArn
+		log.Info("arn: " + w.streamName)
+	}
+
+	err = w.metricsConfig.Init(w.kclConfig.ApplicationName, w.streamName, w.workerID)
 	if err != nil {
 		log.Errorf("Failed to start monitoring service: %+v", err)
 	}
@@ -205,7 +193,8 @@ func (w *Worker) newShardConsumer(shard *par.ShardStatus) *ShardConsumer {
 	return &ShardConsumer{
 		streamName:      w.streamName,
 		shard:           shard,
-		kc:              w.kc,
+		dbClient:        w.dbClient,
+		streamsClient:   w.streamsClient,
 		checkpointer:    w.checkpointer,
 		recordProcessor: w.processorFactory.CreateProcessor(),
 		kclConfig:       w.kclConfig,
@@ -274,10 +263,15 @@ func (w *Worker) eventLoop() {
 
 				log.Infof("Start Shard Consumer for shard: %v", shard.ID)
 				sc := w.newShardConsumer(shard)
-				go sc.getRecords(shard)
+				go func() {
+					err := sc.getRecords(shard)
+					if err != nil {
+						log.Error("Could not get records for shard " + shard.ID)
+					}
+				}()
 				w.waitGroup.Add(1)
 				// exit from for loop and not to grab more shard for now.
-				break
+				// break
 			}
 		}
 
@@ -294,30 +288,29 @@ func (w *Worker) eventLoop() {
 	}
 }
 
-// List all ACTIVE shard and store them into shardStatus table
+// List all ENABLED shards and store them into shardStatus table
 // If shard has been removed, need to exclude it from cached shard status.
 func (w *Worker) getShardIDs(startShardID string, shardInfo map[string]bool) error {
 	// The default pagination limit is 100.
-	args := &kinesis.DescribeStreamInput{
-		StreamName: aws.String(w.streamName),
+	args := &dynamodbstreams.DescribeStreamInput{
+		StreamArn: &w.streamName,
 	}
 
 	if startShardID != "" {
 		args.ExclusiveStartShardId = aws.String(startShardID)
 	}
 
-	streamDesc, err := w.kc.DescribeStream(args)
+	streamDesc, err := w.streamsClient.DescribeStream(args)
 	if err != nil {
 		log.Errorf("Error in DescribeStream: %s Error: %+v Request: %s", w.streamName, err, args)
 		return err
 	}
 
-	if *streamDesc.StreamDescription.StreamStatus != "ACTIVE" {
+	if *streamDesc.StreamDescription.StreamStatus != "ENABLED" {
 		log.Warnf("Stream %s is not active", w.streamName)
 		return errors.New("stream not active")
 	}
 
-	var lastShardID string
 	for _, s := range streamDesc.StreamDescription.Shards {
 		// record avail shardId from fresh reading from Kinesis
 		shardInfo[*s.ShardId] = true
@@ -333,16 +326,16 @@ func (w *Worker) getShardIDs(startShardID string, shardInfo map[string]bool) err
 				EndingSequenceNumber:   aws.StringValue(s.SequenceNumberRange.EndingSequenceNumber),
 			}
 		}
-		lastShardID = *s.ShardId
 	}
 
-	if *streamDesc.StreamDescription.HasMoreShards {
-		err := w.getShardIDs(lastShardID, shardInfo)
-		if err != nil {
-			log.Errorf("Error in getShardIDs: %s Error: %+v", lastShardID, err)
-			return err
-		}
-	}
+	// dynamo shards aren't paginated, you just get them all
+	// if *streamDesc.StreamDescription.HasMoreShards {
+	// 	err := w.getShardIDs(lastShardID, shardInfo)
+	// 	if err != nil {
+	// 		log.Errorf("Error in getShardIDs: %s Error: %+v", lastShardID, err)
+	// 		return err
+	// 	}
+	// }
 
 	return nil
 }

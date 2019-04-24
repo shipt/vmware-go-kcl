@@ -34,29 +34,30 @@
 package config
 
 import (
-	"github.com/aws/aws-sdk-go/aws/credentials"
 	"time"
+
+	"github.com/aws/aws-sdk-go/aws/credentials"
 
 	"github.com/vmware/vmware-go-kcl/clientlibrary/utils"
 )
 
 // NewKinesisClientLibConfig to create a default KinesisClientLibConfiguration based on the required fields.
-func NewKinesisClientLibConfig(applicationName, streamName, regionName, workerID string) *KinesisClientLibConfiguration {
-	return NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regionName, workerID,
+func NewKinesisClientLibConfig(applicationName, tableName, regionName, workerID string) *KinesisClientLibConfiguration {
+	return NewKinesisClientLibConfigWithCredentials(applicationName, tableName, regionName, workerID,
 		nil, nil, nil)
 }
 
 // NewKinesisClientLibConfig to create a default KinesisClientLibConfiguration based on the required fields.
-func NewKinesisClientLibConfigWithCredential(applicationName, streamName, regionName, workerID string,
+func NewKinesisClientLibConfigWithCredential(applicationName, tableName, regionName, workerID string,
 	creds *credentials.Credentials) *KinesisClientLibConfiguration {
-	return NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regionName, workerID, creds, creds, creds)
+	return NewKinesisClientLibConfigWithCredentials(applicationName, tableName, regionName, workerID, creds, creds, creds)
 }
 
 // NewKinesisClientLibConfig to create a default KinesisClientLibConfiguration based on the required fields.
-func NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regionName, workerID string,
+func NewKinesisClientLibConfigWithCredentials(applicationName, tableName, regionName, workerID string,
 	kiniesisCreds, dynamodbCreds, cloudwatchCreds *credentials.Credentials) *KinesisClientLibConfiguration {
 	checkIsValueNotEmpty("ApplicationName", applicationName)
-	checkIsValueNotEmpty("StreamName", streamName)
+	checkIsValueNotEmpty("TableName", tableName)
 	checkIsValueNotEmpty("RegionName", regionName)
 
 	if empty(workerID) {
@@ -66,11 +67,9 @@ func NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regio
 	// populate the KCL configuration with default values
 	return &KinesisClientLibConfiguration{
 		ApplicationName:                                  applicationName,
-		KinesisCredentials:                               kiniesisCreds,
 		DynamoDBCredentials:                              dynamodbCreds,
 		CloudWatchCredentials:                            cloudwatchCreds,
-		TableName:                                        applicationName,
-		StreamName:                                       streamName,
+		TableName:                                        tableName,
 		RegionName:                                       regionName,
 		WorkerID:                                         workerID,
 		InitialPositionInStream:                          DEFAULT_INITIAL_POSITION_IN_STREAM,
@@ -93,12 +92,6 @@ func NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regio
 		InitialLeaseTableWriteCapacity:                   DEFAULT_INITIAL_LEASE_TABLE_WRITE_CAPACITY,
 		SkipShardSyncAtWorkerInitializationIfLeasesExist: DEFAULT_SKIP_SHARD_SYNC_AT_STARTUP_IF_LEASES_EXIST,
 	}
-}
-
-// WithKinesisEndpoint is used to provide an alternative Kinesis endpoint
-func (c *KinesisClientLibConfiguration) WithKinesisEndpoint(kinesisEndpoint string) *KinesisClientLibConfiguration {
-	c.KinesisEndpoint = kinesisEndpoint
-	return c
 }
 
 // WithDynamoDBEndpoint is used to provide an alternative DynamoDB endpoint

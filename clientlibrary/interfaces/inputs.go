@@ -36,8 +36,9 @@ package interfaces
 import (
 	"time"
 
+	"github.com/aws/aws-sdk-go/service/dynamodbstreams"
+
 	"github.com/aws/aws-sdk-go/aws"
-	ks "github.com/aws/aws-sdk-go/service/kinesis"
 )
 
 const (
@@ -84,7 +85,7 @@ type (
 	ProcessRecordsInput struct {
 		CacheEntryTime     *time.Time
 		CacheExitTime      *time.Time
-		Records            []*ks.Record
+		Records            []*dynamodbstreams.Record
 		Checkpointer       IRecordProcessorCheckpointer
 		MillisBehindLatest int64
 	}

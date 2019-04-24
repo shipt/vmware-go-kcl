@@ -23,7 +23,8 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/kinesis"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go/service/dynamodbstreams"
 	chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
 	"github.com/vmware/vmware-go-kcl/clientlibrary/config"
 	kcl "github.com/vmware/vmware-go-kcl/clientlibrary/interfaces"
@@ -48,15 +49,17 @@ func NewCustomWorker(factory kcl.IRecordProcessorFactory, kclConfig *config.Kine
 
 	s, err := session.NewSession(&aws.Config{
 		Region:      aws.String(w.regionName),
-		Endpoint:    &kclConfig.KinesisEndpoint,
-		Credentials: kclConfig.KinesisCredentials,
+		Endpoint:    &kclConfig.DynamoDBEndpoint,
+		Credentials: kclConfig.DynamoDBCredentials,
 	})
 
 	if err != nil {
 		// no need to move forward
 		log.Fatalf("Failed in getting Kinesis session for creating Worker: %+v", err)
 	}
-	w.kc = kinesis.New(s)
+
+	w.dbClient = dynamodb.New(s)
+	w.streamsClient = dynamodbstreams.New(s)
 
 	if w.metricsConfig == nil {
 		// "" means noop monitor service. i.e. not emitting any metrics.

@@ -19,9 +19,6 @@
 package worker
 
 import (
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"os"
 	"testing"
 	"time"
@@ -29,13 +26,12 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/stretchr/testify/assert"
-	chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
 	cfg "github.com/vmware/vmware-go-kcl/clientlibrary/config"
-	"github.com/vmware/vmware-go-kcl/clientlibrary/utils"
+	"github.com/vmware/vmware-go-kcl/clientlibrary/custom"
 )
 
 func TestCustomWorker(t *testing.T) {
-	kclConfig := cfg.NewKinesisClientLibConfig("appName", streamName, regionName, workerID).
+	kclConfig := cfg.NewKinesisClientLibConfig("appName", tableName, regionName, workerID).
 		WithInitialPositionInStream(cfg.LATEST).
 		WithMaxRecords(10).
 		WithMaxLeasesForWorker(1).
@@ -48,36 +44,21 @@ func TestCustomWorker(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 
 	assert.Equal(t, regionName, kclConfig.RegionName)
-	assert.Equal(t, streamName, kclConfig.StreamName)
 
 	// configure cloudwatch as metrics system
 	metricsConfig := getMetricsConfig(kclConfig, metricsSystem)
 
-	// create dynamodb checkpointer.
-	s, err := session.NewSession(&aws.Config{
-		Region:      aws.String(regionName),
-		Endpoint:    &kclConfig.DynamoDBEndpoint,
-		Credentials: kclConfig.DynamoDBCredentials,
-	})
-
-	if err != nil {
-		// no need to move forward
-		log.Fatalf("Failed in getting DynamoDB session for creating Worker: %+v", err)
-	}
-
-	checkpointer := chk.NewDynamoCheckpoint(dynamodb.New(s), kclConfig)
-
-	worker := NewCustomWorker(recordProcessorFactory(t), kclConfig, checkpointer, metricsConfig)
+	chkRedis := custom.NewRedisCheckpointer("redis://localhost:6379", kclConfig)
+	worker := NewCustomWorker(recordProcessorFactory(t), kclConfig, &chkRedis, metricsConfig)
 	assert.Equal(t, regionName, worker.regionName)
-	assert.Equal(t, streamName, worker.streamName)
 
-	err = worker.Start()
+	err := worker.Start()
 	assert.Nil(t, err)
 
 	// Put some data into stream.
 	for i := 0; i < 100; i++ {
 		// Use random string as partition key to ensure even distribution across shards
-		err := worker.Publish(streamName, utils.RandStringBytesMaskImpr(10), []byte(specstr))
+		err := dynamoPublish(worker.dbClient, recordID)
 		if err != nil {
 			t.Errorf("Errorin Publish. %+v", err)
 		}

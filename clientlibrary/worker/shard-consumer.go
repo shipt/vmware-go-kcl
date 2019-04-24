@@ -28,15 +28,18 @@
 package worker
 
 import (
-	log "github.com/sirupsen/logrus"
 	"math"
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go/service/dynamodbstreams"
+
+	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
+	"github.com/aws/aws-sdk-go/service/dynamodbstreams/dynamodbstreamsiface"
+	log "github.com/sirupsen/logrus"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/kinesis"
-	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 
 	chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
 	"github.com/vmware/vmware-go-kcl/clientlibrary/config"
@@ -64,7 +67,7 @@ const (
 
 	// ErrCodeKMSThrottlingException is defined in the API Reference https://docs.aws.amazon.com/sdk-for-go/api/service/kinesis/#Kinesis.GetRecords
 	// But it's not a constant?
-	ErrCodeKMSThrottlingException = "KMSThrottlingException"
+	ErrCodeKMSThrottlingException = "LimitExceededException"
 )
 
 type ShardConsumerState int
@@ -74,7 +77,8 @@ type ShardConsumerState int
 type ShardConsumer struct {
 	streamName      string
 	shard           *par.ShardStatus
-	kc              kinesisiface.KinesisAPI
+	dbClient        dynamodbiface.DynamoDBAPI
+	streamsClient   dynamodbstreamsiface.DynamoDBStreamsAPI
 	checkpointer    chk.Checkpointer
 	recordProcessor kcl.IRecordProcessor
 	kclConfig       *config.KinesisClientLibConfiguration
@@ -97,12 +101,13 @@ func (sc *ShardConsumer) getShardIterator(shard *par.ShardStatus) (*string, erro
 		initPos := sc.kclConfig.InitialPositionInStream
 		log.Debugf("No checkpoint recorded for shard: %v, starting with: %v", shard.ID,
 			aws.StringValue(config.InitalPositionInStreamToShardIteratorType(initPos)))
-		shardIterArgs := &kinesis.GetShardIteratorInput{
+
+		iterInput := &dynamodbstreams.GetShardIteratorInput{
 			ShardId:           &shard.ID,
 			ShardIteratorType: config.InitalPositionInStreamToShardIteratorType(initPos),
-			StreamName:        &sc.streamName,
+			StreamArn:         &sc.streamName,
 		}
-		iterResp, err := sc.kc.GetShardIterator(shardIterArgs)
+		iterResp, err := sc.streamsClient.GetShardIterator(iterInput)
 		if err != nil {
 			return nil, err
 		}
@@ -110,13 +115,13 @@ func (sc *ShardConsumer) getShardIterator(shard *par.ShardStatus) (*string, erro
 	}
 
 	log.Debugf("Start shard: %v at checkpoint: %v", shard.ID, shard.Checkpoint)
-	shardIterArgs := &kinesis.GetShardIteratorInput{
-		ShardId:                &shard.ID,
-		ShardIteratorType:      aws.String("AFTER_SEQUENCE_NUMBER"),
-		StartingSequenceNumber: &shard.Checkpoint,
-		StreamName:             &sc.streamName,
+	shardIterArgs := &dynamodbstreams.GetShardIteratorInput{
+		ShardId:           &shard.ID,
+		ShardIteratorType: aws.String("AFTER_SEQUENCE_NUMBER"),
+		SequenceNumber:    &shard.Checkpoint,
+		StreamArn:         &sc.streamName,
 	}
-	iterResp, err := sc.kc.GetShardIterator(shardIterArgs)
+	iterResp, err := sc.streamsClient.GetShardIterator(shardIterArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -171,16 +176,16 @@ func (sc *ShardConsumer) getRecords(shard *par.ShardStatus) error {
 			}
 		}
 
-		log.Debugf("Trying to read %d record from iterator: %v", sc.kclConfig.MaxRecords, aws.StringValue(shardIterator))
-		getRecordsArgs := &kinesis.GetRecordsInput{
+		log.Debugf("Trying to read %d record from iterator for shard: %v", sc.kclConfig.MaxRecords, shard.ID)
+		getRecordsArgs := &dynamodbstreams.GetRecordsInput{
 			Limit:         aws.Int64(int64(sc.kclConfig.MaxRecords)),
 			ShardIterator: shardIterator,
 		}
 		// Get records from stream and retry as needed
-		getResp, err := sc.kc.GetRecords(getRecordsArgs)
+		getResp, err := sc.streamsClient.GetRecords(getRecordsArgs)
 		if err != nil {
 			if awsErr, ok := err.(awserr.Error); ok {
-				if awsErr.Code() == kinesis.ErrCodeProvisionedThroughputExceededException || awsErr.Code() == ErrCodeKMSThrottlingException {
+				if awsErr.Code() == dynamodbstreams.ErrCodeLimitExceededException || awsErr.Code() == ErrCodeKMSThrottlingException {
 					log.Errorf("Error getting records from shard %v: %+v", shard.ID, err)
 					retriedErrors++
 					// exponential backoff
@@ -198,18 +203,18 @@ func (sc *ShardConsumer) getRecords(shard *par.ShardStatus) error {
 
 		// IRecordProcessorCheckpointer
 		input := &kcl.ProcessRecordsInput{
-			Records:            getResp.Records,
-			MillisBehindLatest: aws.Int64Value(getResp.MillisBehindLatest),
-			Checkpointer:       recordCheckpointer,
+			Records: getResp.Records,
+			// not supported by dynamo
+			// MillisBehindLatest: aws.Int64Value(getResp.MillisBehindLatest)
+			Checkpointer: recordCheckpointer,
 		}
 
 		recordLength := len(input.Records)
-		recordBytes := int64(0)
-		log.Debugf("Received %d records, MillisBehindLatest: %v", recordLength, input.MillisBehindLatest)
+		// recordBytes := int64(0)
 
-		for _, r := range getResp.Records {
-			recordBytes += int64(len(r.Data))
-		}
+		// for _, r := range getResp.Records {
+		// 	recordBytes += int64(len(r.Data))
+		// }
 
 		if recordLength > 0 || sc.kclConfig.CallProcessRecordsEvenForEmptyRecordList {
 			processRecordsStartTime := time.Now()
@@ -223,8 +228,8 @@ func (sc *ShardConsumer) getRecords(shard *par.ShardStatus) error {
 		}
 
 		sc.mService.IncrRecordsProcessed(shard.ID, recordLength)
-		sc.mService.IncrBytesProcessed(shard.ID, recordBytes)
-		sc.mService.MillisBehindLatest(shard.ID, float64(*getResp.MillisBehindLatest))
+		// sc.mService.IncrBytesProcessed(shard.ID, recordBytes)
+		// sc.mService.MillisBehindLatest(shard.ID, float64(*getResp.MillisBehindLatest))
 
 		// Convert from nanoseconds to milliseconds
 		getRecordsTime := time.Since(getRecordsStartTime) / 1000000
@@ -233,7 +238,8 @@ func (sc *ShardConsumer) getRecords(shard *par.ShardStatus) error {
 		// Idle between each read, the user is responsible for checkpoint the progress
 		// This value is only used when no records are returned; if records are returned, it should immediately
 		// retrieve the next set of records.
-		if recordLength == 0 && aws.Int64Value(getResp.MillisBehindLatest) < int64(sc.kclConfig.IdleTimeBetweenReadsInMillis) {
+		// if recordLength == 0 && aws.Int64Value(getResp.MillisBehindLatest) < int64(sc.kclConfig.IdleTimeBetweenReadsInMillis) {
+		if recordLength == 0 && sc.kclConfig.IdleTimeBetweenReadsInMillis > 0 {
 			time.Sleep(time.Duration(sc.kclConfig.IdleTimeBetweenReadsInMillis) * time.Millisecond)
 		}
 

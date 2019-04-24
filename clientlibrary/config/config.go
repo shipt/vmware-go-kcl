@@ -165,10 +165,6 @@ type (
 
 		// KinesisEndpoint is an optional endpoint URL that overrides the default generated endpoint for a Kinesis client.
 		// If this is empty, the default generated endpoint will be used.
-		KinesisEndpoint string
-
-		// KinesisCredentials is used to access Kinesis
-		KinesisCredentials *creds.Credentials
 
 		// DynamoDBCredentials is used to access DynamoDB
 		DynamoDBCredentials *creds.Credentials
