@@ -67,7 +67,7 @@ func (rc *RecordProcessorCheckpointer) Checkpoint(sequenceNumber *string) error 
 	rc.shard.Mux.Lock()
 
 	// checkpoint the last sequence of a closed shard
-	if sequenceNumber == nil {
+	if sequenceNumber == nil || *sequenceNumber == rc.shard.EndingSequenceNumber {
 		rc.shard.Checkpoint = chk.SHARD_END
 	} else {
 		rc.shard.Checkpoint = aws.StringValue(sequenceNumber)

@@ -244,7 +244,6 @@ func (w *Worker) eventLoop() {
 					}
 				}
 
-				// The shard is closed and we have processed all records
 				if shard.Checkpoint == chk.SHARD_END {
 					continue
 				}
@@ -262,14 +261,16 @@ func (w *Worker) eventLoop() {
 				w.mService.LeaseGained(shard.ID)
 
 				log.Infof("Start Shard Consumer for shard: %v", shard.ID)
-				sc := w.newShardConsumer(shard)
-				go func() {
-					err := sc.getRecords(shard)
+				sc := w.newShardConsumer(shard, w.shardStatus)
+				go func(s *par.ShardStatus) {
+					err := sc.getRecords(s)
 					if err != nil {
-						log.Error("Could not get records for shard " + shard.ID)
+						log.Error("Could not get records for shard " + s.ID)
 					}
-				}()
+				}(shard)
 				w.waitGroup.Add(1)
+
+				// TODO: maybe re enable this
 				// exit from for loop and not to grab more shard for now.
 				// break
 			}
